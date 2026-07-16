@@ -29,8 +29,15 @@ type ProcessConfig struct {
 	StopWait      time.Duration     `yaml:"stop_wait"`
 }
 
-// Config define el archivo raíz que contiene múltiples procesos.
+// HTTPConfig define la configuración del servidor HTTP integrado (H5).
+type HTTPConfig struct {
+	Enabled bool `yaml:"enabled"`
+	Port    int  `yaml:"port"`
+}
+
+// Config define el archivo raíz que contiene múltiples procesos y la API HTTP.
 type Config struct {
+	HTTPAPI   HTTPConfig      `yaml:"http_api"`
 	Processes []ProcessConfig `yaml:"processes"`
 }
 

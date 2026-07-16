@@ -283,7 +283,7 @@ func TestSupervisor_GracefulShutdown(t *testing.T) {
 	// 1. Compilar un binario de prueba para que corra inmediatamente y se quede colgado
 	sleepScript := filepath.Join(tmpDir, "sleep.go")
 	os.WriteFile(sleepScript, []byte(`package main; import "time"; func main() { time.Sleep(10 * time.Second) }`), 0644)
-	
+
 	binFile := filepath.Join(tmpDir, "sleep_bin")
 	if runtime.GOOS == "windows" {
 		binFile += ".exe"
@@ -310,7 +310,7 @@ func TestSupervisor_GracefulShutdown(t *testing.T) {
 	}
 
 	sv := NewSupervisor(cfg, tmpDir)
-	
+
 	// Iniciamos con el ctx global
 	ctx, cancelGlobal := context.WithCancel(context.Background())
 	defer cancelGlobal()

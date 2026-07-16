@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -12,6 +13,8 @@ import (
 	"sync"
 	"time"
 )
+
+var ErrProcessNotFound = errors.New("proceso no encontrado")
 
 // ProcessState enumera los posibles estados de un proceso supervisado
 type ProcessState string
@@ -99,6 +102,104 @@ func (s *Supervisor) incrementStartCount(name string) {
 	}
 }
 
+// ResetStartCount resetea el contador de arranques (útil tras reinicios manuales).
+func (s *Supervisor) ResetStartCount(name string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.resetStartCountLocked(name)
+}
+
+func (s *Supervisor) resetStartCountLocked(name string) {
+	if stat, ok := s.statuses[name]; ok {
+		stat.RestartCount = 0
+	}
+}
+
+// StopProcess detiene manualmente un proceso sin reiniciarlo. Es idempotente.
+func (s *Supervisor) StopProcess(name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Chequeamos si existe en la config
+	if !s.configHasProcess(name) {
+		return fmt.Errorf("%w: %s", ErrProcessNotFound, name)
+	}
+
+	if cancel, ok := s.cancelFuncs[name]; ok {
+		cancel()
+		delete(s.cancelFuncs, name)
+	}
+	return nil
+}
+
+// StartProcess arranca un proceso si no está corriendo. Es idempotente.
+func (s *Supervisor) StartProcess(name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.globalCtx == nil {
+		return fmt.Errorf("supervisor no ha sido iniciado aún")
+	}
+
+	proc := s.getProcessConfig(name)
+	if proc == nil {
+		return fmt.Errorf("%w: %s", ErrProcessNotFound, name)
+	}
+
+	if _, ok := s.cancelFuncs[name]; ok {
+		// Ya está corriendo o en proceso de backoff
+		return nil
+	}
+
+	// Como es manual, le reseteamos los contadores
+	s.resetStartCountLocked(name)
+
+	s.startProcessLocked(s.globalCtx, *proc)
+	return nil
+}
+
+// RestartProcess reinicia manualmente un proceso.
+func (s *Supervisor) RestartProcess(name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.globalCtx == nil {
+		return fmt.Errorf("supervisor no ha sido iniciado aún")
+	}
+
+	proc := s.getProcessConfig(name)
+	if proc == nil {
+		return fmt.Errorf("%w: %s", ErrProcessNotFound, name)
+	}
+
+	if cancel, ok := s.cancelFuncs[name]; ok {
+		cancel()
+		delete(s.cancelFuncs, name)
+	}
+
+	// Reset counters for manual restart
+	s.resetStartCountLocked(name)
+
+	s.startProcessLocked(s.globalCtx, *proc)
+	return nil
+}
+
+func (s *Supervisor) configHasProcess(name string) bool {
+	return s.getProcessConfig(name) != nil
+}
+
+func (s *Supervisor) getProcessConfig(name string) *ProcessConfig {
+	if s.Config == nil {
+		return nil
+	}
+	for _, p := range s.Config.Processes {
+		if p.Name == name {
+			return &p
+		}
+	}
+	return nil
+}
+
 // Start lanza todos los procesos y los supervisa según su política de reinicio.
 func (s *Supervisor) Start(ctx context.Context) {
 	s.mu.Lock()
@@ -130,7 +231,7 @@ func (s *Supervisor) ReloadConfig(newConfig *Config) {
 	// 1. Identificar removidos y modificados
 	for name, oldP := range oldProcs {
 		newP, exists := newProcs[name]
-		
+
 		if !exists {
 			// Fue removido de la configuración
 			if cancel, ok := s.cancelFuncs[name]; ok {

@@ -49,6 +49,23 @@ func main() {
 	log.Println("[INFO] Iniciando supervisor. Presione Ctrl+C para detener.")
 	sv.Start(ctx)
 
+	// H5: Iniciar el servidor HTTP si está habilitado
+	var apiServer *HTTPServer
+	if cfg.HTTPAPI.Enabled {
+		port := cfg.HTTPAPI.Port
+		if port == 0 {
+			port = 8080 // default
+		}
+		apiServer = NewHTTPServer(sv, port)
+		apiServer.Start()
+
+		// Goroutine para apagar el servidor HTTP limpiamente al cancelar el contexto
+		go func() {
+			<-ctx.Done()
+			apiServer.Shutdown(context.Background())
+		}()
+	}
+
 	// Esperamos a que todas las goroutines supervisadas terminen.
 	// Si un proceso es "always", esta línea bloqueará indefinidamente hasta presionar Ctrl+C.
 	sv.Wait()

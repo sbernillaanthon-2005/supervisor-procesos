@@ -1,0 +1,20 @@
+processes:
+  - name: worker1
+    command: "python"
+    args: 
+      - "-c"
+      - "import time, sys; print('arrancando worker1...'); time.sleep(2); print('terminado worker1'); sys.exit(0)"
+    env:
+      LOG_LEVEL: "debug"
+      APP_ENV: "dev"
+    working_dir: "."
+    restart_policy: always
+    
+  - name: failer
+    command: "python"
+    args: 
+      - "-c"
+      - "import sys, time; print('arrancando failer...'); time.sleep(1); print('voy a fallar'); sys.exit(1)"
+    env: {}
+    working_dir: "."
+    restart_policy: on-failure

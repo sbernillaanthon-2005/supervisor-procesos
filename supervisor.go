@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"time"
 )
@@ -35,16 +36,19 @@ type Supervisor struct {
 	wg      sync.WaitGroup
 
 	// Estado protegido por mutex para evitar data-races
-	mu       sync.Mutex
-	statuses map[string]*ProcessStatus
+	mu          sync.Mutex
+	statuses    map[string]*ProcessStatus
+	cancelFuncs map[string]context.CancelFunc
+	globalCtx   context.Context
 }
 
 // NewSupervisor crea una nueva instancia del supervisor.
 func NewSupervisor(cfg *Config, logsDir string) *Supervisor {
 	return &Supervisor{
-		Config:   cfg,
-		LogsDir:  logsDir,
-		statuses: make(map[string]*ProcessStatus),
+		Config:      cfg,
+		LogsDir:     logsDir,
+		statuses:    make(map[string]*ProcessStatus),
+		cancelFuncs: make(map[string]context.CancelFunc),
 	}
 }
 
@@ -97,14 +101,86 @@ func (s *Supervisor) incrementStartCount(name string) {
 
 // Start lanza todos los procesos y los supervisa según su política de reinicio.
 func (s *Supervisor) Start(ctx context.Context) {
-	for _, proc := range s.Config.Processes {
-		s.wg.Add(1)
+	s.mu.Lock()
+	s.globalCtx = ctx
+	s.mu.Unlock()
 
-		go func(p ProcessConfig) {
-			defer s.wg.Done()
-			s.superviseProcess(ctx, p)
-		}(proc)
+	for _, proc := range s.Config.Processes {
+		s.startProcess(ctx, proc)
 	}
+}
+
+// ReloadConfig actualiza la configuración en caliente (H4) de forma concurrente y segura.
+func (s *Supervisor) ReloadConfig(newConfig *Config) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	oldProcs := make(map[string]ProcessConfig)
+	if s.Config != nil {
+		for _, p := range s.Config.Processes {
+			oldProcs[p.Name] = p
+		}
+	}
+
+	newProcs := make(map[string]ProcessConfig)
+	for _, p := range newConfig.Processes {
+		newProcs[p.Name] = p
+	}
+
+	// 1. Identificar removidos y modificados
+	for name, oldP := range oldProcs {
+		newP, exists := newProcs[name]
+		
+		if !exists {
+			// Fue removido de la configuración
+			if cancel, ok := s.cancelFuncs[name]; ok {
+				cancel() // Detenemos la goroutine
+				delete(s.cancelFuncs, name)
+				log.Printf("[INFO] [%s] Proceso removido en recarga. Deteniendo...", name)
+			}
+		} else {
+			// Modificado? Simple diff
+			// Si cambió algo (ej. comando, dirs), reiniciamos usando deep equal.
+			if !reflect.DeepEqual(oldP, newP) {
+				if cancel, ok := s.cancelFuncs[name]; ok {
+					cancel()
+					delete(s.cancelFuncs, name)
+					log.Printf("[INFO] [%s] Configuración modificada. Reiniciando con nuevos parámetros...", name)
+				}
+				// Volvemos a arrancar con los nuevos parámetros
+				s.startProcessLocked(s.globalCtx, newP)
+			}
+		}
+	}
+
+	// 2. Identificar nuevos
+	for name, newP := range newProcs {
+		if _, exists := oldProcs[name]; !exists {
+			log.Printf("[INFO] [%s] Proceso nuevo detectado. Arrancando...", name)
+			s.startProcessLocked(s.globalCtx, newP)
+		}
+	}
+
+	// 3. Actualizamos la referencia interna de configuración
+	s.Config = newConfig
+	log.Printf("[INFO] Recarga de configuración completada.")
+}
+
+func (s *Supervisor) startProcess(ctx context.Context, proc ProcessConfig) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.startProcessLocked(ctx, proc)
+}
+
+func (s *Supervisor) startProcessLocked(ctx context.Context, proc ProcessConfig) {
+	childCtx, cancel := context.WithCancel(ctx)
+	s.cancelFuncs[proc.Name] = cancel
+	s.wg.Add(1)
+
+	go func(p ProcessConfig, c context.Context) {
+		defer s.wg.Done()
+		s.superviseProcess(c, p)
+	}(proc, childCtx)
 }
 
 // Wait bloquea hasta que todas las goroutines supervisadas hayan terminado.
@@ -271,6 +347,16 @@ func (s *Supervisor) runProcess(ctx context.Context, proc ProcessConfig) error {
 
 	cmd.Stdout = outFile
 	cmd.Stderr = errFile
+
+	// H4: Configurar apagado ordenado usando WaitDelay y Cancel (Go 1.20+)
+	stopWait := proc.StopWait
+	if stopWait <= 0 {
+		stopWait = 5 * time.Second // Default Grace Period
+	}
+	cmd.WaitDelay = stopWait
+	cmd.Cancel = func() error {
+		return sendSignal(cmd.Process, proc.StopSignal, proc.Name)
+	}
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("fallo al arrancar: %w", err)

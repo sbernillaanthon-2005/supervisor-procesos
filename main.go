@@ -37,11 +37,14 @@ func main() {
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		sig := <-sigs
-		log.Printf("\n[INFO] Señal de sistema %v recibida. Cancelando el contexto global (H2)...", sig)
-		cancel() // Esto viaja a todas las goroutines e interrumpe los exec.CommandContext
+		log.Printf("\n[INFO] Señal de sistema %v recibida. Cancelando el contexto global (H2/H4)...", sig)
+		cancel() // Esto viaja a todas las goroutines e interrumpe los exec.CommandContext, activando el apagado ordenado de H4
 	}()
 
 	sv := NewSupervisor(cfg, logsDir)
+
+	// H4: Escuchar señal de recarga (SIGHUP en Unix, dummy en Windows)
+	ListenReloadSignal(sv, configPath)
 
 	log.Println("[INFO] Iniciando supervisor. Presione Ctrl+C para detener.")
 	sv.Start(ctx)

@@ -25,6 +25,8 @@ type ProcessConfig struct {
 	WorkingDir    string            `yaml:"working_dir"`
 	RestartPolicy string            `yaml:"restart_policy"` // always, on-failure, never
 	Backoff       *BackoffConfig    `yaml:"backoff"`
+	StopSignal    string            `yaml:"stop_signal"`
+	StopWait      time.Duration     `yaml:"stop_wait"`
 }
 
 // Config define el archivo raíz que contiene múltiples procesos.

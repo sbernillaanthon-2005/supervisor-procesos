@@ -9,6 +9,11 @@ processes:
       APP_ENV: "dev"
     working_dir: "."
     restart_policy: always
+    backoff:
+      base: 1s
+      factor: 2.0
+      max: 8s
+      max_tries: 5
     
   - name: failer
     command: "python"
@@ -18,3 +23,8 @@ processes:
     env: {}
     working_dir: "."
     restart_policy: on-failure
+    backoff:
+      base: 500ms
+      factor: 1.5
+      max: 5s
+      max_tries: -1 # -1 significa reintentos infinitos

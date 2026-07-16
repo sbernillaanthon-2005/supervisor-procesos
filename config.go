@@ -3,9 +3,18 @@ package main
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
+
+// BackoffConfig define las reglas de reinicio exponencial.
+type BackoffConfig struct {
+	Base     time.Duration `yaml:"base"`
+	Factor   float64       `yaml:"factor"`
+	Max      time.Duration `yaml:"max"`
+	MaxTries int           `yaml:"max_tries"`
+}
 
 // ProcessConfig define la configuración de un proceso individual a supervisar.
 type ProcessConfig struct {
@@ -15,6 +24,7 @@ type ProcessConfig struct {
 	Env           map[string]string `yaml:"env"`
 	WorkingDir    string            `yaml:"working_dir"`
 	RestartPolicy string            `yaml:"restart_policy"` // always, on-failure, never
+	Backoff       *BackoffConfig    `yaml:"backoff"`
 }
 
 // Config define el archivo raíz que contiene múltiples procesos.

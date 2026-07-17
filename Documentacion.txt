@@ -1,0 +1,324 @@
+========================================================================
+GUÍA DE EXPOSICIÓN FINAL - SUPERVISOR DE PROCESOS (H1 a H5)
+========================================================================
+Guion paso a paso con TODOS los comandos exactos para demostrar
+cada hito en la terminal frente al profesor.
+
+IMPORTANTE: Todos los comandos se ejecutan desde la carpeta del proyecto:
+  D:\9 CICLO\9ciclo\TALLER DE LENGUAJES DE PROGRAMACIÓN\FINAL CHALLENGE\Supervisor de procesos
+
+========================================================================
+PASO 0: COMPILACIÓN Y VALIDACIÓN GENERAL
+========================================================================
+Antes de demostrar cualquier hito, corre estos comandos para probar
+que TODO compila y pasa las pruebas. Esto lo haces PRIMERO frente al
+profesor para generar confianza.
+
+COMANDO 1 - Compilar el proyecto:
+  go build ./...
+
+  (Si no imprime nada, significa que compiló perfecto. Se genera supervisor.exe)
+
+COMANDO 2 - Verificar estilo y buenas prácticas:
+  go vet ./...
+  gofmt -l .
+
+  (Si no imprime nada, significa que todo está limpio y formateado)
+
+COMANDO 3 - Correr TODAS las pruebas con detector de carreras:
+  go test -race ./... -count=1 -v
+
+  (Verás todos los tests pasar: TestLoadConfig, TestAPI_Status, etc.)
+  (El flag -race es CLAVE: demuestra que no hay data races en concurrencia)
+
+========================================================================
+HITO 1: ARRANQUE, CONFIGURACIÓN Y LOGS
+========================================================================
+Qué se demuestra: El supervisor lee un YAML, lanza procesos y redirige
+su salida a archivos de log.
+
+--- PASO 1: Mostrar el archivo de configuración ---
+  type config.yaml
+
+  (Explica: "Acá defino dos procesos: worker1 con política always
+   y failer con política on-failure. Cada uno tiene su comando,
+   argumentos, variables de entorno y configuración de backoff.")
+
+--- PASO 2: Compilar y ejecutar el supervisor ---
+  go build ./...
+  .\supervisor.exe config.yaml
+
+  (Verás en la consola mensajes como:
+   [INFO] Iniciando supervisor. Presione Ctrl+C para detener.
+   [INFO] [worker1] Arrancando proceso...
+   [INFO] [failer] Arrancando proceso...
+  )
+
+--- PASO 3: En OTRA terminal, mostrar que los logs se crearon ---
+  dir logs
+
+  (Verás archivos como: worker1.out.log, worker1.err.log,
+   failer.out.log, failer.err.log)
+
+  type logs\worker1.out.log
+
+  (Verás la salida del proceso: "arrancando worker1...")
+
+--- PASO 4: Detener el supervisor con Ctrl+C ---
+
+QUÉ DECIR AL PROFESOR:
+"El supervisor lee la configuración YAML usando gopkg.in/yaml.v3,
+ lanza cada proceso con os/exec.Command y redirige stdout y stderr
+ a archivos de log independientes por proceso."
+
+========================================================================
+HITO 2: COORDINACIÓN CON GOROUTINES Y POLÍTICAS DE REINICIO
+========================================================================
+Qué se demuestra: Cada proceso corre en su propia goroutine.
+Si muere, el supervisor lo detecta y lo reinicia según su política.
+
+--- PASO 1: Ejecutar el supervisor ---
+  .\supervisor.exe config.yaml
+
+--- PASO 2: Observar en la consola ---
+  Verás que worker1 (política "always") se reinicia cada vez que
+  termina limpiamente:
+    [INFO] [worker1] Arrancando proceso...
+    [INFO] [worker1] Terminó limpiamente (exit code 0)
+    [INFO] [worker1] Arrancando proceso...     <-- se reinicia solo
+
+  Y que failer (política "on-failure") también se reinicia porque
+  sale con exit code 1:
+    [INFO] [failer] Arrancando proceso...
+    [ERROR] [failer] Terminó con error: exit status 1
+    [INFO] [failer] Arrancando proceso...      <-- se reinicia por el error
+
+--- PASO 3: Demostrar la política "never" (opcional) ---
+  Puedes agregar temporalmente un tercer proceso al config.yaml:
+    - name: one_shot
+      command: "python"
+      args: ["-c", "print('hola, solo una vez')"]
+      restart_policy: never
+
+  Al correr el supervisor, verás:
+    [INFO] [one_shot] Arrancando proceso...
+    [INFO] [one_shot] Terminó limpiamente (exit code 0)
+    [INFO] [one_shot] Política 'never'. No se reinicia. Estado -> STOPPED.
+
+--- PASO 4: Detener con Ctrl+C ---
+
+QUÉ DECIR AL PROFESOR:
+"Cada proceso vive en su propia goroutine dentro de la función
+ superviseProcess(). Uso context.Context para coordinarlas: cuando
+ cancelo el contexto padre, todas las goroutines hijas se enteran
+ y terminan limpiamente. La política de reinicio se evalúa después
+ de cada muerte del proceso."
+
+========================================================================
+HITO 3: BACKOFF EXPONENCIAL Y MÁQUINA DE ESTADOS
+========================================================================
+Qué se demuestra: Un proceso que falla repetidamente NO se reinicia
+al instante (lo cual saturaría la CPU), sino que espera tiempos
+crecientes: 500ms, 750ms, 1125ms... hasta un tope.
+
+--- PASO 1: Ejecutar el supervisor ---
+  .\supervisor.exe config.yaml
+
+--- PASO 2: Observar el backoff del proceso "failer" ---
+  En la consola verás los tiempos de espera creciendo:
+    [ERROR] [failer] Terminó con error: exit status 1
+    [INFO] [failer] Backoff (Fallo #1): esperando 500ms antes de reiniciar...
+    [ERROR] [failer] Terminó con error: exit status 1
+    [INFO] [failer] Backoff (Fallo #2): esperando 750ms antes de reiniciar...
+    [ERROR] [failer] Terminó con error: exit status 1
+    [INFO] [failer] Backoff (Fallo #3): esperando 1.125s antes de reiniciar...
+
+  (Los tiempos crecen: base=500ms * factor=1.5 en cada fallo,
+   con un tope máximo de 5s)
+
+--- PASO 3: Demostrar StateFailed con tope de reintentos ---
+  Para esto modifica temporalmente failer en config.yaml:
+    max_tries: 3    (en vez de -1)
+
+  Corre de nuevo:
+    .\supervisor.exe config.yaml
+
+  Verás que tras 3 fallos seguidos:
+    [INFO] [failer] Alcanzó el tope de 3 reintentos fallidos. Estado -> FAILED.
+    (Y ya no intenta más)
+
+--- PASO 4: Detener con Ctrl+C ---
+
+--- PASO 5: Correr el test específico de backoff ---
+  go test -race -run TestSupervisor_BackoffAndState -v
+
+  (Verás el test pasar, demostrando que la máquina de estados
+   transiciona correctamente: running -> backoff -> failed)
+
+QUÉ DECIR AL PROFESOR:
+"La máquina de estados tiene 4 estados: running, backoff, stopped y
+ failed. El backoff usa la fórmula: delay = base * (factor ^ intentos),
+ con un tope máximo configurable. Si se alcanzan max_tries fallos
+ consecutivos, el proceso pasa a StateFailed y ya no se reinicia más.
+ Si el proceso sale limpiamente (exit 0), el contador de fallos se
+ resetea a cero."
+
+========================================================================
+HITO 4: APAGADO ORDENADO Y RECARGA DE CONFIGURACIÓN
+========================================================================
+Qué se demuestra: Al presionar Ctrl+C, el supervisor NO mata los
+procesos brutalmente. Les da un periodo de gracia para que terminen
+limpiamente. También soporta recarga de config sin reiniciar todo.
+
+--- PASO 1: Ejecutar el supervisor ---
+  .\supervisor.exe config.yaml
+
+--- PASO 2: Presionar Ctrl+C ---
+  Verás en la consola:
+    [INFO] Señal de sistema SIGINT recibida. Cancelando el contexto global...
+    [WARN] [worker1] Windows no soporta señal 'SIGTERM'... Forzando SIGKILL.
+    [INFO] [worker1] Supervisor apagándose tras ejecución. Estado -> STOPPED.
+    [INFO] Todos los procesos han terminado. Saliendo del programa principal.
+
+  (En Windows se usa SIGKILL directo porque no soporta SIGTERM nativo.
+   En Linux usaría SIGTERM primero, espera el grace period, y luego SIGKILL)
+
+--- PASO 3: Correr el test específico de graceful shutdown ---
+  go test -race -run TestSupervisor_GracefulShutdown -v
+
+  (Este test verifica que al cancelar el contexto mientras un proceso
+   está vivo, se invoca la señal de terminación correctamente)
+
+--- PASO 4: Demostrar recarga de configuración (SIGHUP) ---
+  go test -race -run TestSupervisor_ReloadConfig -v
+
+  (Este test demuestra que al recargar:
+   - Procesos eliminados del YAML se detienen
+   - Procesos modificados se reinician con la nueva config
+   - Procesos nuevos se arrancan
+   Todo sin reiniciar el supervisor entero)
+
+QUÉ DECIR AL PROFESOR:
+"El apagado ordenado funciona así: capturo SIGINT/SIGTERM con
+ os/signal.Notify, cancelo el contexto global, y cada goroutine
+ detecta ctx.Done(). El exec.CommandContext tiene configurado un
+ WaitDelay (grace period) antes de forzar el kill. Para la recarga,
+ comparo la config vieja con la nueva usando reflect.DeepEqual
+ y solo reinicio lo que cambió."
+
+========================================================================
+HITO 5: API HTTP PARA CONSULTAR Y CONTROLAR PROCESOS
+========================================================================
+Qué se demuestra: El supervisor expone endpoints HTTP para ver el
+estado y controlar procesos remotamente.
+
+--- PASO 1: Agregar http_api al config.yaml ---
+  Agrega estas líneas AL FINAL de tu config.yaml:
+
+  http_api:
+    enabled: true
+    port: 8080
+
+--- PASO 2: Ejecutar el supervisor ---
+  .\supervisor.exe config.yaml
+
+  Verás un nuevo mensaje:
+    [INFO] Iniciando servidor HTTP API en :8080
+
+--- PASO 3: En OTRA terminal, consultar el estado ---
+  curl -s http://localhost:8080/status
+
+  Respuesta esperada (JSON):
+  {
+    "processes": [
+      {"name":"worker1","state":"running","restarts":2},
+      {"name":"failer","state":"backoff","restarts":1}
+    ]
+  }
+
+--- PASO 4: Detener un proceso manualmente ---
+  curl -X POST http://localhost:8080/processes/worker1/stop
+
+  Respuesta esperada:
+  {"message":"señal de detención enviada","status":"pending"}
+
+  Haz otro GET /status y verás que worker1 ahora dice "stopped".
+
+--- PASO 5: Reiniciar el proceso detenido ---
+  curl -X POST http://localhost:8080/processes/worker1/restart
+
+  Respuesta esperada:
+  {"message":"señal de reinicio enviada","status":"pending"}
+
+  Haz otro GET /status y verás que worker1 volvió a "running"
+  con restarts en 0 (porque el reinicio manual resetea el contador).
+
+--- PASO 6: Intentar una acción sobre un proceso inexistente ---
+  curl -X POST http://localhost:8080/processes/noexiste/stop
+
+  Respuesta esperada (error 404):
+  {"error":"proceso no encontrado: noexiste"}
+
+--- PASO 7: Correr los tests específicos de la API ---
+  go test -race -run TestAPI -v
+
+  (Correrá: TestAPI_Status, TestAPI_MethodNotAllowed,
+   TestAPI_ProcessesActions, TestAPI_UnstartedSupervisor)
+
+--- PASO 8: Detener el supervisor con Ctrl+C ---
+  Verás que tanto los procesos como el servidor HTTP se apagan limpiamente.
+
+QUÉ DECIR AL PROFESOR:
+"La API HTTP usa net/http de la librería estándar, sin frameworks.
+ El servidor está deshabilitado por defecto por seguridad: solo
+ arranca si el operador pone enabled: true en el YAML. Las respuestas
+ de control son asíncronas (status: pending) porque el apagado real
+ puede tardar varios segundos por el grace period. Los tests usan
+ httptest.NewRecorder para no necesitar puertos reales."
+
+========================================================================
+COMANDO FINAL: VALIDACIÓN COMPLETA (el comando estrella)
+========================================================================
+Este es el comando que demuestra que TODO funciona, incluyendo
+el detector de carreras de concurrencia:
+
+  go build ./... && go vet ./... && gofmt -l . && go test -race ./... -count=1
+
+Si no imprime errores y dice "ok supervisor", tu proyecto está PERFECTO.
+
+Para una validación más agresiva (10 corridas):
+  go test -race ./... -count=10
+
+========================================================================
+PREGUNTAS TÍPICAS DEL PROFESOR (Y QUÉ RESPONDER)
+========================================================================
+
+P: "¿Por qué usaste Mutex y no Channels para el estado?"
+R: "Porque el estado se consulta desde la API HTTP en cualquier momento.
+    Un mutex me permite leer el map de estados de forma rápida y directa.
+    Con channels tendría que montar un actor/bus de eventos solo para
+    consultas de lectura, lo cual es más complejo sin beneficio real."
+
+P: "¿Cómo garantizas que no quedan goroutines huérfanas?"
+R: "Cada proceso se ejecuta con exec.CommandContext vinculado al contexto
+    global. Cuando cancelo el contexto, Go mata el subproceso. Además
+    uso sync.WaitGroup: el main() hace sv.Wait() que bloquea hasta que
+    TODAS las goroutines supervisoras terminen. En los tests también
+    hago defer cancel() + sv.Wait() para limpiar."
+
+P: "¿Qué pasa si alguien llama /start antes de que el supervisor arranque?"
+R: "Antes devolvía panic por nil context. Lo corregí con una guarda
+    explícita: si globalCtx == nil, devuelve un error HTTP 500 con el
+    mensaje 'supervisor no ha sido iniciado aún'. Tengo un test
+    específico para esto: TestAPI_UnstartedSupervisor."
+
+P: "¿Por qué el reinicio manual resetea el contador de fallos?"
+R: "Porque un reinicio manual es una intervención del operador. Si el
+    proceso estaba en StateFailed porque agotó sus reintentos, asumo que
+    el humano ya investigó y arregló la causa. Le doy una nueva
+    oportunidad limpia con el contador en cero."
+
+P: "¿Tu código pasa go test -race?"
+R: "Sí. Corro go test -race -count=10 ./... y pasa las 10 corridas
+    sin detectar ninguna condición de carrera."
+    (Córrelo en vivo para demostrarlo)

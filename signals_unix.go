@@ -10,40 +10,47 @@ import (
 	"syscall"
 )
 
-// sendSignal maneja el envío de señales a un proceso.
-func sendSignal(p *os.Process, sigStr string, name string) error {
-	var sig os.Signal
-	switch strings.ToUpper(sigStr) {
+func terminateProcess(p *os.Process, requested string, name string) error {
+	var sig syscall.Signal
+	switch strings.ToUpper(requested) {
+	case "", "SIGTERM":
+		sig = syscall.SIGTERM
 	case "SIGINT":
 		sig = syscall.SIGINT
+	case "SIGHUP":
+		sig = syscall.SIGHUP
 	case "SIGKILL":
 		sig = syscall.SIGKILL
-	case "SIGQUIT":
-		sig = syscall.SIGQUIT
-	case "SIGTERM", "":
-		sig = syscall.SIGTERM
 	default:
-		log.Printf("[WARN] [%s] Señal desconocida '%s', usando SIGTERM", name, sigStr)
 		sig = syscall.SIGTERM
 	}
-
-	log.Printf("[INFO] [%s] Enviando señal %v para apagado ordenado", name, sig)
+	log.Printf("[INFO] [%s] enviando señal Unix %s", name, sig)
 	return p.Signal(sig)
 }
 
-// ListenReloadSignal en Unix atrapa SIGHUP para recargar la configuración.
-func ListenReloadSignal(s *Supervisor, configPath string) {
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGHUP)
+func ListenReloadSignal(s *Supervisor, path string) func() {
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGHUP)
+	done := make(chan struct{})
 	go func() {
-		for sig := range sigs {
-			log.Printf("\n[INFO] Señal de sistema %v recibida. Recargando configuración...", sig)
-			cfg, err := LoadConfig(configPath)
-			if err != nil {
-				log.Printf("[ERROR] Fallo al recargar configuración: %v", err)
-				continue
+		for {
+			select {
+			case <-ch:
+				cfg, err := LoadConfig(path)
+				if err != nil {
+					log.Printf("[ERROR] recarga rechazada: %v", err)
+					continue
+				}
+				if err := s.ReloadConfig(cfg); err != nil {
+					log.Printf("[ERROR] recarga fallida: %v", err)
+				}
+			case <-done:
+				return
 			}
-			s.ReloadConfig(cfg)
 		}
 	}()
+	return func() {
+		signal.Stop(ch)
+		close(done)
+	}
 }

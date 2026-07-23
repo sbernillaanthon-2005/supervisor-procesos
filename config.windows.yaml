@@ -1,0 +1,44 @@
+http_api:
+  enabled: true
+  host: 127.0.0.1
+  port: 8080
+
+processes:
+  - name: salida-exitosa
+    command: powershell.exe
+    args: ["-NoProfile", "-Command", "Write-Output 'ejecución correcta'; exit 0"]
+    restart_policy: never
+
+  - name: salida-error
+    command: powershell.exe
+    args: ["-NoProfile", "-Command", "[Console]::Error.WriteLine('error esperado'); exit 1"]
+    restart_policy: never
+
+  - name: worker-never
+    command: powershell.exe
+    args: ["-NoProfile", "-Command", "Write-Output \"worker $env:WORKER_MODE iniciado\"; Start-Sleep -Seconds 300"]
+    env:
+      WORKER_MODE: demo
+    working_dir: .
+    restart_policy: never
+    stop_wait: 2s
+
+  - name: worker-on-failure
+    command: powershell.exe
+    args: ["-NoProfile", "-Command", "[Console]::Error.WriteLine('fallo para demostrar backoff'); exit 2"]
+    restart_policy: on-failure
+    backoff:
+      base: 1s
+      factor: 2
+      max: 4s
+      max_tries: 3
+
+  - name: worker-always
+    command: powershell.exe
+    args: ["-NoProfile", "-Command", "Write-Output 'reinicio por política always'; Start-Sleep -Seconds 2; exit 0"]
+    restart_policy: always
+    backoff:
+      base: 1s
+      factor: 2
+      max: 4s
+      max_tries: 3

@@ -8,107 +8,76 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 )
 
-// ProcessStatusInfo represents the JSON response format for a single process.
 type ProcessStatusInfo struct {
 	Name     string `json:"name"`
 	State    string `json:"state"`
 	Restarts int    `json:"restarts"`
+	Starts   int    `json:"starts"`
 }
-
-// StatusResponse represents the JSON response format for the /status endpoint.
 type StatusResponse struct {
 	Processes []ProcessStatusInfo `json:"processes"`
 }
-
-// ActionResponse represents the JSON response format for control endpoints.
 type ActionResponse struct {
 	Message string `json:"message"`
 	Status  string `json:"status"`
 }
-
-// ErrorResponse represents the JSON response for errors.
 type ErrorResponse struct {
 	Error string `json:"error"`
 }
 
-// HTTPServer encapuslates the HTTP API and the Supervisor reference.
 type HTTPServer struct {
-	server *http.Server
-	sv     *Supervisor
+	server     *http.Server
+	sv         *Supervisor
+	configPath string
+	errCh      chan error
 }
 
-// NewHTTPServer creates a new HTTPServer.
 func NewHTTPServer(sv *Supervisor, port int) *HTTPServer {
-	mux := http.NewServeMux()
-	hs := &HTTPServer{
-		sv: sv,
-	}
+	return NewHTTPServerForConfig(sv, "127.0.0.1", port, "")
+}
 
+func NewHTTPServerForConfig(sv *Supervisor, host string, port int, configPath string) *HTTPServer {
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	mux := http.NewServeMux()
+	hs := &HTTPServer{sv: sv, configPath: configPath, errCh: make(chan error, 1)}
 	mux.HandleFunc("/status", hs.handleStatus)
 	mux.HandleFunc("/processes/", hs.handleProcesses)
-
+	mux.HandleFunc("/reload", hs.handleReload)
 	hs.server = &http.Server{
-		Addr:    fmt.Sprintf(":%d", port),
-		Handler: mux,
+		Addr:              fmt.Sprintf("%s:%d", host, port),
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
-
 	return hs
 }
 
-// Start launches the HTTP server in a goroutine.
 func (hs *HTTPServer) Start() {
-	log.Printf("[INFO] Iniciando servidor HTTP API en %s", hs.server.Addr)
+	log.Printf("[INFO] API HTTP en http://%s", hs.server.Addr)
 	go func() {
-		if err := hs.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Printf("[ERROR] Servidor HTTP falló: %v", err)
+		err := hs.server.ListenAndServe()
+		if errors.Is(err, http.ErrServerClosed) {
+			err = nil
 		}
+		hs.errCh <- err
 	}()
 }
-
-// Shutdown cleanly stops the HTTP server.
-func (hs *HTTPServer) Shutdown(ctx context.Context) error {
-	log.Printf("[INFO] Deteniendo servidor HTTP API...")
-	return hs.server.Shutdown(ctx)
-}
+func (hs *HTTPServer) Shutdown(ctx context.Context) error { return hs.server.Shutdown(ctx) }
+func (hs *HTTPServer) Wait() error                        { return <-hs.errCh }
 
 func (hs *HTTPServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		sendError(w, http.StatusMethodNotAllowed, "método no soportado")
 		return
 	}
-
-	// Fetch statuses from supervisor
-	hs.sv.mu.Lock()
-	var processes []ProcessStatusInfo
-	if hs.sv.Config != nil {
-		for _, p := range hs.sv.Config.Processes {
-			st := hs.sv.statuses[p.Name]
-			if st != nil {
-				processes = append(processes, ProcessStatusInfo{
-					Name:     p.Name,
-					State:    string(st.State),
-					Restarts: st.RestartCount,
-				})
-			} else {
-				processes = append(processes, ProcessStatusInfo{
-					Name:     p.Name,
-					State:    string(StateStopped),
-					Restarts: 0,
-				})
-			}
-		}
-	}
-	hs.sv.mu.Unlock()
-
-	// Handle empty case to return `[]` instead of `null`
-	if processes == nil {
-		processes = make([]ProcessStatusInfo, 0)
-	}
-
-	resp := StatusResponse{Processes: processes}
-	sendJSON(w, http.StatusOK, resp)
+	sendJSON(w, http.StatusOK, StatusResponse{Processes: hs.sv.StatusSnapshot()})
 }
 
 func (hs *HTTPServer) handleProcesses(w http.ResponseWriter, r *http.Request) {
@@ -116,57 +85,65 @@ func (hs *HTTPServer) handleProcesses(w http.ResponseWriter, r *http.Request) {
 		sendError(w, http.StatusMethodNotAllowed, "método no soportado")
 		return
 	}
-
-	// URL format: /processes/{name}/{action}
-	path := strings.TrimPrefix(r.URL.Path, "/processes/")
-	parts := strings.Split(path, "/")
-	if len(parts) != 2 {
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/processes/"), "/")
+	if len(parts) != 2 || parts[0] == "" {
 		sendError(w, http.StatusBadRequest, "ruta inválida")
 		return
 	}
-
-	name := parts[0]
-	action := parts[1]
-
 	var err error
-	var msg string
-
-	switch action {
-	case "stop":
-		err = hs.sv.StopProcess(name)
-		msg = "señal de detención enviada"
+	switch parts[1] {
 	case "start":
-		err = hs.sv.StartProcess(name)
-		msg = "señal de arranque enviada"
+		err = hs.sv.StartProcess(parts[0])
+	case "stop":
+		err = hs.sv.StopProcess(parts[0])
 	case "restart":
-		err = hs.sv.RestartProcess(name)
-		msg = "señal de reinicio enviada"
+		err = hs.sv.RestartProcess(parts[0])
 	default:
 		sendError(w, http.StatusBadRequest, "acción inválida")
 		return
 	}
-
 	if err != nil {
-		if errors.Is(err, ErrProcessNotFound) {
-			sendError(w, http.StatusNotFound, err.Error())
-		} else {
-			sendError(w, http.StatusInternalServerError, err.Error())
-		}
+		sendSupervisorError(w, err)
 		return
 	}
-
-	sendJSON(w, http.StatusOK, ActionResponse{
-		Message: msg,
-		Status:  "pending",
-	})
+	sendJSON(w, http.StatusOK, ActionResponse{Message: "operación completada", Status: "completed"})
 }
 
-func sendJSON(w http.ResponseWriter, status int, payload interface{}) {
+func (hs *HTTPServer) handleReload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		sendError(w, http.StatusMethodNotAllowed, "método no soportado")
+		return
+	}
+	if hs.configPath == "" {
+		sendError(w, http.StatusInternalServerError, "ruta de configuración no disponible")
+		return
+	}
+	cfg, err := LoadConfig(hs.configPath)
+	if err == nil {
+		err = hs.sv.ReloadConfig(cfg)
+	}
+	if err != nil {
+		sendError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	sendJSON(w, http.StatusOK, ActionResponse{Message: "configuración recargada", Status: "completed"})
+}
+
+func sendSupervisorError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, ErrProcessNotFound):
+		sendError(w, http.StatusNotFound, err.Error())
+	case errors.Is(err, ErrConflict):
+		sendError(w, http.StatusConflict, err.Error())
+	default:
+		sendError(w, http.StatusInternalServerError, err.Error())
+	}
+}
+func sendJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(payload)
+	_ = json.NewEncoder(w).Encode(payload)
 }
-
 func sendError(w http.ResponseWriter, status int, msg string) {
 	sendJSON(w, status, ErrorResponse{Error: msg})
 }

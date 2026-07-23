@@ -3,24 +3,32 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"os"
+	"os/exec"
+	"strconv"
 )
 
-// sendSignal maneja el envío de señales a un proceso.
-// En Windows, enviar señales como SIGTERM a un proceso de consola no está soportado nativamente
-// por os.Process.Signal (retornará "not supported by windows").
-func sendSignal(p *os.Process, sigStr string, name string) error {
-	if sigStr == "" {
-		sigStr = "SIGTERM"
+// terminateProcess finaliza el árbol administrado. Windows no ofrece una
+// señal equivalente a SIGTERM para aplicaciones de consola arbitrarias.
+func terminateProcess(p *os.Process, _ string, name string) error {
+	if p == nil {
+		return nil
 	}
-	log.Printf("[WARN] [%s] Windows no soporta señal '%s' de forma nativa. Forzando SIGKILL.", name, sigStr)
-	return p.Kill()
+	log.Printf("[WARN] [%s] Windows: finalizando el árbol de procesos; no es un SIGTERM ordenado", name)
+	cmd := exec.Command("taskkill", "/PID", strconv.Itoa(p.Pid), "/T", "/F")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		if killErr := p.Kill(); killErr != nil && !errorsProcessDone(killErr) {
+			return fmt.Errorf("taskkill: %v (%s); Kill: %w", err, out, killErr)
+		}
+	}
+	return nil
 }
 
-// ListenReloadSignal en Windows no hace nada, porque SIGHUP no existe.
-// Para recargar la configuración en Windows, se debe llamar a ReloadConfig programáticamente
-// o implementar un endpoint alternativo.
-func ListenReloadSignal(s *Supervisor, configPath string) {
-	log.Printf("[INFO] SIGHUP no está soportado en Windows. Usa recarga programática.")
+func errorsProcessDone(err error) bool { return err == os.ErrProcessDone }
+
+func ListenReloadSignal(_ *Supervisor, _ string) func() {
+	log.Printf("[INFO] Windows: recarga disponible mediante POST /reload")
+	return func() {}
 }

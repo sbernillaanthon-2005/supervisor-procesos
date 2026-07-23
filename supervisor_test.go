@@ -340,7 +340,74 @@ func TestSupervisor_GracefulShutdown(t *testing.T) {
 
 	// 3. Verificar que se invocó sendSignal
 	logOut := buf.String()
-	if !strings.Contains(logOut, "Forzando SIGKILL") && !strings.Contains(logOut, "Enviando señal") {
+	if !strings.Contains(logOut, "finalizando el árbol") && !strings.Contains(logOut, "enviando señal Unix") {
 		t.Errorf("No se encontró evidencia de que sendSignal fue invocado. Logs: %s", logOut)
+	}
+}
+
+func TestSupervisor_NaturalExitCanStartAgainAndCleansRun(t *testing.T) {
+	cfg := &Config{Processes: []ProcessConfig{{
+		Name: "natural", Command: "go", Args: []string{"version"}, RestartPolicy: "never",
+	}}}
+	sv := NewSupervisor(cfg, t.TempDir())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sv.Start(ctx)
+	sv.Wait()
+
+	sv.mu.Lock()
+	active := sv.processes["natural"].done != nil
+	_, hasCancel := sv.cancelFuncs["natural"]
+	sv.mu.Unlock()
+	if active || hasCancel {
+		t.Fatal("la ejecución natural dejó referencias activas")
+	}
+	if err := sv.StartProcess("natural"); err != nil {
+		t.Fatalf("no se pudo iniciar de nuevo: %v", err)
+	}
+	sv.Wait()
+	if got := sv.GetStartCount("natural"); got != 2 {
+		t.Fatalf("arranques = %d; se esperaban 2", got)
+	}
+}
+
+func TestSupervisor_ConcurrentStartCreatesOneRun(t *testing.T) {
+	cfg := &Config{Processes: []ProcessConfig{{
+		Name: "one", Command: "go", Args: []string{"version"}, RestartPolicy: "never",
+	}}}
+	sv := NewSupervisor(cfg, t.TempDir())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sv.mu.Lock()
+	sv.globalCtx = ctx
+	sv.mu.Unlock()
+
+	const callers = 20
+	var wg sync.WaitGroup
+	wg.Add(callers)
+	for range callers {
+		go func() {
+			defer wg.Done()
+			_ = sv.StartProcess("one")
+		}()
+	}
+	wg.Wait()
+	sv.Wait()
+	if got := sv.GetStartCount("one"); got != 1 {
+		t.Fatalf("se crearon ejecuciones duplicadas: %d", got)
+	}
+}
+
+func TestSupervisor_ReloadInvalidKeepsActiveConfig(t *testing.T) {
+	cfg := &Config{Processes: []ProcessConfig{{
+		Name: "stable", Command: "go", Args: []string{"version"}, RestartPolicy: "never",
+	}}}
+	sv := NewSupervisor(cfg, t.TempDir())
+	err := sv.ReloadConfig(&Config{Processes: []ProcessConfig{{Name: "bad"}}})
+	if err == nil {
+		t.Fatal("se esperaba rechazo de recarga inválida")
+	}
+	if got := sv.StatusSnapshot(); len(got) != 1 || got[0].Name != "stable" {
+		t.Fatalf("la recarga inválida alteró la configuración: %+v", got)
 	}
 }

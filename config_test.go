@@ -2,7 +2,10 @@ package main
 
 import (
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoadConfig(t *testing.T) {
@@ -63,6 +66,45 @@ processes:
 	}
 	if len(proc2.Args) != 0 {
 		t.Errorf("args debería estar vacío, se obtuvieron %d elementos", len(proc2.Args))
+	}
+}
+
+func TestConfigValidate(t *testing.T) {
+	valid := ProcessConfig{Name: "worker", Command: "go", RestartPolicy: "never"}
+	tests := []struct {
+		name string
+		cfg  Config
+		want string
+	}{
+		{"nombre vacío", Config{Processes: []ProcessConfig{{Command: "go"}}}, "nombre vacío"},
+		{"duplicado", Config{Processes: []ProcessConfig{valid, valid}}, "duplicado"},
+		{"comando vacío", Config{Processes: []ProcessConfig{{Name: "x"}}}, "comando vacío"},
+		{"política", Config{Processes: []ProcessConfig{{Name: "x", Command: "go", RestartPolicy: "sometimes"}}}, "política inválida"},
+		{"stop negativo", Config{Processes: []ProcessConfig{{Name: "x", Command: "go", StopWait: -time.Second}}}, "negativo"},
+		{"factor", Config{Processes: []ProcessConfig{{Name: "x", Command: "go", Backoff: &BackoffConfig{Factor: 1}}}}, "factor"},
+		{"puerto", Config{HTTPAPI: HTTPConfig{Port: 70000}, Processes: []ProcessConfig{valid}}, "puerto"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.cfg.Validate(); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Validate() = %v; se esperaba error con %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadConfigAppliesHTTPDefaults(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	data := []byte("http_api:\n  enabled: true\nprocesses:\n  - name: x\n    command: go\n")
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HTTPAPI.Host != "127.0.0.1" || cfg.HTTPAPI.Port != 8080 {
+		t.Fatalf("defaults HTTP inesperados: %+v", cfg.HTTPAPI)
 	}
 }
 

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -49,15 +51,61 @@ func TestAPI_Status(t *testing.T) {
 	// Validar que los estados se mapean correctamente
 	for _, p := range resp.Processes {
 		if p.Name == "p1" {
-			if p.State != "running" || p.Restarts != 1 {
+			if p.State != "running" || p.Starts != 1 {
 				t.Errorf("Estado incorrecto para p1: %+v", p)
 			}
 		} else if p.Name == "p2" {
-			if p.State != "failed" || p.Restarts != 2 {
+			if p.State != "failed" || p.Starts != 2 {
 				t.Errorf("Estado incorrecto para p2: %+v", p)
 			}
 		}
 	}
+}
+
+func TestAPI_Reload(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	data := []byte("processes:\n  - name: p1\n    command: go\n    args: [version]\n")
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sv := NewSupervisor(cfg, t.TempDir())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sv.Start(ctx)
+	hs := NewHTTPServerForConfig(sv, "127.0.0.1", 0, path)
+
+	req := httptest.NewRequest(http.MethodPost, "/reload", nil)
+	rr := httptest.NewRecorder()
+	hs.server.Handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("POST /reload = %d: %s", rr.Code, rr.Body.String())
+	}
+	sv.Wait()
+}
+
+func TestAPI_Conflict(t *testing.T) {
+	cfg := &Config{Processes: []ProcessConfig{{Name: "p1", Command: "go", Args: []string{"version"}}}}
+	sv := NewSupervisor(cfg, t.TempDir())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sv.mu.Lock()
+	sv.globalCtx = ctx
+	sv.mu.Unlock()
+	if err := sv.StartProcess("p1"); err != nil {
+		t.Fatal(err)
+	}
+	hs := NewHTTPServer(sv, 0)
+	req := httptest.NewRequest(http.MethodPost, "/processes/p1/start", nil)
+	rr := httptest.NewRecorder()
+	hs.server.Handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("inicio duplicado = %d; se esperaba 409", rr.Code)
+	}
+	sv.Wait()
 }
 
 func TestAPI_MethodNotAllowed(t *testing.T) {
@@ -118,8 +166,8 @@ func TestAPI_ProcessesActions(t *testing.T) {
 		if tc.expectedCode == http.StatusOK {
 			var resp ActionResponse
 			if err := json.Unmarshal(rr.Body.Bytes(), &resp); err == nil {
-				if resp.Status != "pending" {
-					t.Errorf("Para %s: esperaba status 'pending', obtuvo '%s'", tc.path, resp.Status)
+				if resp.Status != "completed" {
+					t.Errorf("Para %s: esperaba status 'completed', obtuvo '%s'", tc.path, resp.Status)
 				}
 			}
 		}
